@@ -4,7 +4,6 @@ import json
 import yaml
 from datasets import Dataset, load_dataset
 from pandarallel import pandarallel
-from tqdm import tqdm
 
 from routellm.controller import Controller
 from routellm.routers.routers import ROUTER_CLS
@@ -19,7 +18,7 @@ if __name__ == "__main__":
         "--routers",
         nargs="+",
         type=str,
-        default=["random"],
+        default=["mf"],
         choices=list(ROUTER_CLS.keys()),
     )
     parser.add_argument("--strong-model-pct", type=float)

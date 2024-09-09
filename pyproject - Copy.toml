@@ -18,7 +18,9 @@ dependencies = [
 	'scikit-learn',
 	'tqdm',
 	'openai',
+	'transformers',
 	'datasets',
+	'litellm',
 	'python-dotenv',
 	'sentence-transformers'
 ]

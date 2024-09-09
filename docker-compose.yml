@@ -1,0 +1,13 @@
+version: '3'
+
+services:
+  server:
+    container_name: route-llm
+    build:
+      context: .
+      dockerfile: Dockerfile  # Use the updated Dockerfile for production
+    ports:
+      - "6060:6060"  # Map container's port 8000 to host's port 8000
+    environment:
+      - LLM_QUEUE_GATEWAY_BASE_PATH=http://host.docker.internal:8070/llm-queue-gateway  # Load environment variables
+      - FLASK_ENV=production  # Set the environment to production

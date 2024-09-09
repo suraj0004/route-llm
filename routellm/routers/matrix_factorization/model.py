@@ -1,7 +1,10 @@
 import torch
 from huggingface_hub import PyTorchModelHubMixin
+import requests
+import logging
+from sentence_transformers import SentenceTransformer
 
-from routellm.routers.similarity_weighted.utils import OPENAI_CLIENT
+# from routellm.routers.similarity_weighted.utils import OPENAI_CLIENT
 
 MODEL_IDS = {
     "RWKV-4-Raven-14B": 0,
@@ -70,6 +73,13 @@ MODEL_IDS = {
     "zephyr-7b-beta": 63,
 }
 
+class EmbeddingTransformer(torch.nn.Module):
+    def __init__(self, input_dim=384, output_dim=1536):
+        super(EmbeddingTransformer, self).__init__()
+        self.transform = torch.nn.Linear(input_dim, output_dim)
+    
+    def forward(self, x):
+        return self.transform(x)
 
 class MFModel(torch.nn.Module, PyTorchModelHubMixin):
     def __init__(
@@ -108,16 +118,46 @@ class MFModel(torch.nn.Module, PyTorchModelHubMixin):
 
         model_embed = self.P(model_id)
         model_embed = torch.nn.functional.normalize(model_embed, p=2, dim=1)
-
+        logging.info('prompt')
+        logging.info(prompt)
         prompt_embed = (
-            OPENAI_CLIENT.embeddings.create(input=[prompt], model=self.embedding_model)
-            .data[0]
-            .embedding
+            self.generate_embed(prompt=prompt)
         )
-        prompt_embed = torch.tensor(prompt_embed, device=self.get_device())
-        prompt_embed = self.text_proj(prompt_embed)
+        logging.info('generated_embed')
+        logging.info(len(prompt_embed))
+        # Convert the list to a PyTorch tensor
+        prompt_embed_tensor = torch.tensor(prompt_embed, dtype=torch.float32)
+
+        # Instantiate the transformer and move it to the appropriate device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        embedding_transformer = EmbeddingTransformer(input_dim=384, output_dim=1536).to(device)
+
+        # Ensure the tensor is on the same device as the model
+        prompt_embed_tensor = prompt_embed_tensor.to(device)
+
+        # Transform the embedding
+        prompt_embed_transformed = embedding_transformer(prompt_embed_tensor)
+        logging.info('prompt_embed_transformed')
+        logging.info(prompt_embed_transformed)
+
+        # prompt_embed = torch.tensor(prompt_embed_transformed, device=self.get_device())
+        # logging.info(prompt_embed)
+        prompt_embed = self.text_proj(prompt_embed_transformed)
 
         return self.classifier(model_embed * prompt_embed).squeeze()
+
+    def generate_embed(self, prompt):
+        # response = requests.post('http://localhost:11434/api/embeddings', json={"model": "mxbai-embed-large", "prompt": prompt})
+        # response.raise_for_status()
+        # return response.json()["embedding"]
+        revision = None  # Replace with the specific revision to ensure reproducibility if the model is updated.
+
+        model = SentenceTransformer("avsolatorio/GIST-all-MiniLM-L6-v2", revision=revision)
+
+        # Compute embeddings
+        embeddings = model.encode(prompt, convert_to_tensor=False)
+
+        return embeddings
 
     @torch.no_grad()
     def pred_win_rate(self, model_a, model_b, prompt):

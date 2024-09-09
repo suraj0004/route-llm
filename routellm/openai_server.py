@@ -16,16 +16,22 @@ import uvicorn
 import yaml
 from fastapi.concurrency import asynccontextmanager
 from fastapi.responses import JSONResponse, StreamingResponse
-from openai import AsyncOpenAI
+# from openai import AsyncOpenAI
 from pydantic import BaseModel, Field
 
 from routellm.controller import Controller, RoutingError
 from routellm.routers.routers import ROUTER_CLS
+from fastapi import Request, HTTPException
+
+from typing import AsyncIterable, List
+from fastapi.responses import StreamingResponse
+import json
+from typing import AsyncIterator
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 CONTROLLER = None
 
-openai_client = AsyncOpenAI()
+# openai_client = AsyncOpenAI()
 count = defaultdict(lambda: defaultdict(int))
 
 
@@ -68,21 +74,21 @@ class ChatCompletionRequest(BaseModel):
         List[Dict[str, str]],
         List[Dict[str, Union[str, List[Dict[str, Union[str, Dict[str, str]]]]]]],
     ]
-    frequency_penalty: Optional[float] = 0.0
+    frequency_penalty: Optional[float] = None
     logit_bias: Optional[Dict[int, float]] = None
     logprobs: Optional[bool] = None
     top_logprobs: Optional[int] = None
     max_tokens: Optional[int] = None
-    n: Optional[int] = 1
-    presence_penalty: Optional[float] = 0.0
+    n: Optional[int] = None
+    presence_penalty: Optional[float] = None
     response_format: Optional[Dict[str, str]] = (
         None  # { "type": "json_object" } for json mode
     )
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = None
     stream: Optional[bool] = False
-    temperature: Optional[float] = 1.0
-    top_p: Optional[float] = 1.0
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
     tools: Optional[List[Dict[str, Union[str, int, float]]]] = None
     tool_choice: Optional[str] = None
     user: Optional[str] = None
@@ -108,36 +114,83 @@ class ChatCompletionResponse(BaseModel):
     usage: UsageInfo
 
 
-async def stream_response(response) -> AsyncGenerator:
-    async for chunk in response:
-        yield f"data: {chunk.model_dump_json()}\n\n"
-    yield "data: [DONE]\n\n"
+# async def stream_response(response) -> AsyncGenerator:
+#     async for chunk in response:
+#         yield f"data: {chunk.model_dump_json()}\n\n"
+#     yield "data: [DONE]\n\n"
 
+async def stream_response(response: List[dict]) -> AsyncIterable[bytes]:
+    for item in response:
+        # Convert each item to a JSON string and then to bytes
+        yield json.dumps(item).encode('utf-8')
+        # If there should be a delay between chunks, you can use `await asyncio.sleep(seconds)`
 
-@app.post("/v1/chat/completions")
-async def create_chat_completion(request: ChatCompletionRequest):
-    # The model name field contains the parameters for routing.
-    # Model name uses format router-[router name]-[threshold] e.g. router-bert-0.7
-    # The router type and threshold is used for routing that specific request.
-    logging.info(f"Received request: {request}")
+# @app.post("/route-llm/{full_path:path}")
+# async def create_chat_completion(request: Request, full_path: str):
+#     # The model name field contains the parameters for routing.
+#     # Model name uses format router-[router name]-[threshold] e.g. router-bert-0.7
+#     # The router type and threshold is used for routing that specific request.
+
+#     # The full_path variable will capture anything after '/route-llm/'
+#     logging.info(f"Received request at /route-llm/{full_path}")
+
+#     body = await request.json()
+#     logging.info(f"Received request: {body}")
+#     try:
+#         stream = body.get("stream", True)  # Determine if streaming is required from request body
+#         body["stream"] = stream
+#         logging.info(stream)
+#         if stream == True:
+#             async def generate_stream() -> AsyncIterator[bytes]:
+#                 async for line in CONTROLLER.acompletion( full_path=full_path, **body):
+#                     yield line
+
+#             return StreamingResponse(
+#                 generate_stream(),
+#                 media_type="application/x-ndjson",
+#                 headers={"Connection": "keep-alive"}
+#             )
+#         else:
+#             logging.info("json")
+#             async for response_data in CONTROLLER.acompletion( full_path=full_path, **body):
+#                 return JSONResponse(content=json.loads(response_data.decode('utf-8')))
+#     except Exception as e:
+#         logging.error(f"Error: {e}")
+#         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/route-llm/{full_path:path}")
+async def create_chat_completion(request: Request, full_path: str):
+    logging.info(f"Received request at /route-llm/{full_path}")
+
+    body = await request.json()
+    logging.info(f"Received request: {body}")
+
     try:
-        res = await CONTROLLER.acompletion(
-            **request.model_dump(exclude_none=True),
-        )
-    except RoutingError as e:
-        return JSONResponse(
-            ErrorResponse(message=str(e)).model_dump(),
-            status_code=400,
-        )
+        stream = body.get("stream", True)  # Determine if streaming is required from request body
+        body["stream"] = stream
 
-    logging.info(CONTROLLER.model_counts)
+        if stream:
+            async def generate_stream() -> AsyncIterator[bytes]:
+                async for chunk in CONTROLLER.acompletion(full_path=full_path, **body):
+                    yield chunk
 
-    if request.stream:
-        return StreamingResponse(
-            content=stream_response(res), media_type="text/event-stream"
-        )
-    else:
-        return JSONResponse(content=res.model_dump())
+            return StreamingResponse(
+                generate_stream(),
+                media_type="application/x-ndjson",
+                headers={"Connection": "keep-alive"}
+            )
+
+        else:
+            # Handle non-streaming case
+            logging.info("Non-streaming response requested")
+            async for response_data in CONTROLLER.acompletion(full_path=full_path, **body):
+                return JSONResponse(content=json.loads(response_data.decode('utf-8')))
+
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 
 
 @app.get("/health")
@@ -145,6 +198,22 @@ async def health_check():
     """Health check endpoint."""
     return JSONResponse(content={"status": "online"})
 
+@app.get("/")
+async def welcome():
+    """welcome and threshold list endpoint."""
+    return JSONResponse(content={"status": "200", "message":"server is up and running", "mf-routers-with-threshold": {
+        "router-mf-0.62589":"0%",
+        "router-mf-0.24034":"10%",
+        "router-mf-0.1881":"20%",
+        "router-mf-0.15609":"30%",
+        "router-mf-0.1339":"40%",
+        "router-mf-0.11593":"50%",
+        "router-mf-0.09995":"60%",
+        "router-mf-0.08535":"70%",
+        "router-mf-0.07075":"80%",
+        "router-mf-0.05438":"90%",
+        "router-mf-0.00937":"100%",
+    }})
 
 parser = argparse.ArgumentParser(
     description="An OpenAI-compatible API server for LLM routing."
@@ -160,7 +229,7 @@ parser.add_argument(
     "--routers",
     nargs="+",
     type=str,
-    default=["random"],
+    default=["mf"],
     choices=list(ROUTER_CLS.keys()),
 )
 parser.add_argument(
@@ -175,9 +244,9 @@ parser.add_argument(
     type=str,
     default=None,
 )
-parser.add_argument("--strong-model", type=str, default="gpt-4-1106-preview")
+parser.add_argument("--strong-model", type=str, default="strong")
 parser.add_argument(
-    "--weak-model", type=str, default="anyscale/mistralai/Mixtral-8x7B-Instruct-v0.1"
+    "--weak-model", type=str, default="weak"
 )
 args = parser.parse_args()
 
