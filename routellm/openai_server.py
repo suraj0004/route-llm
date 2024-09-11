@@ -162,14 +162,20 @@ async def stream_response(response: List[dict]) -> AsyncIterable[bytes]:
 async def create_chat_completion(request: Request, full_path: str):
     logging.info(f"Received request at /route-llm/{full_path}")
 
-    body = await request.json()
-    logging.info(f"Received request: {body}")
-
     try:
-        stream = body.get("stream", True)  # Determine if streaming is required from request body
-        body["stream"] = stream
+        # Parse the JSON body from the request
+        body = await request.json()
+        logging.info(f"Request body: {body}")
 
+        # Determine if streaming is required
+        stream = body.get("stream", True)
+        body["stream"] = stream
+        logging.info(f"Streaming enabled: {stream}")
+
+        # Handle streaming response
         if stream:
+            logging.info("Preparing streaming response")
+
             async def generate_stream() -> AsyncIterator[bytes]:
                 async for chunk in CONTROLLER.acompletion(full_path=full_path, **body):
                     yield chunk
@@ -181,15 +187,18 @@ async def create_chat_completion(request: Request, full_path: str):
             )
 
         else:
-            # Handle non-streaming case
-            logging.info("Non-streaming response requested")
+            # Handle non-streaming response
+            logging.info("Handling non-streaming response")
             async for response_data in CONTROLLER.acompletion(full_path=full_path, **body):
                 return JSONResponse(content=json.loads(response_data.decode('utf-8')))
 
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except json.JSONDecodeError as e:
+        logging.error(f"Failed to parse request body as JSON: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
 
+    except Exception as e:
+        logging.error(f"Error processing request: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 

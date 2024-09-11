@@ -3,8 +3,18 @@ from huggingface_hub import PyTorchModelHubMixin
 import requests
 import logging
 from sentence_transformers import SentenceTransformer
+import numpy as np
+from dotenv import load_dotenv
+import os
+import aiohttp
+import asyncio
+# Load environment variables from the .env file
+load_dotenv()   
 
-# from routellm.routers.similarity_weighted.utils import OPENAI_CLIENT
+# Access the environment variable
+llm_queue_gateway_base_path = os.getenv('LLM_QUEUE_GATEWAY_BASE_PATH')
+use_ollama  = os.getenv('USE_OLLAMA_FOR_EMBEDDING', 'True').lower() == 'true'
+embedding_model = os.getenv('EMBEDDING_MODEL', 'mxbai-embed-large')
 
 MODEL_IDS = {
     "RWKV-4-Raven-14B": 0,
@@ -73,13 +83,25 @@ MODEL_IDS = {
     "zephyr-7b-beta": 63,
 }
 
-class EmbeddingTransformer(torch.nn.Module):
+class EmbeddingTransformer:
     def __init__(self, input_dim=384, output_dim=1536):
-        super(EmbeddingTransformer, self).__init__()
-        self.transform = torch.nn.Linear(input_dim, output_dim)
-    
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
     def forward(self, x):
-        return self.transform(x)
+        # Convert to numpy if input is a PyTorch tensor
+        if isinstance(x, torch.Tensor):
+            x = x.detach().cpu().numpy()
+
+        # Ensure the input is of the correct shape
+        if x.shape[-1] != self.input_dim:
+            raise ValueError(f"Expected input dimension {self.input_dim}, but got {x.shape[-1]}")
+        
+        # Zero padding to expand to output_dim dimensions
+        padded_vector = np.pad(x, (0, self.output_dim - self.input_dim), mode='constant')
+
+        # Convert the padded numpy array back to torch tensor
+        return torch.tensor(padded_vector, dtype=torch.float32)
 
 class MFModel(torch.nn.Module, PyTorchModelHubMixin):
     def __init__(
@@ -114,51 +136,73 @@ class MFModel(torch.nn.Module, PyTorchModelHubMixin):
         return self.P.weight.device
 
     def forward(self, model_id, prompt):
-        model_id = torch.tensor(model_id, dtype=torch.long).to(self.get_device())
+        try:
+            logging.info('Starting forward pass')
+            logging.info('model_id:')
+            logging.info(model_id)
+            
+            # Move model_id to tensor and device
+            device = self.get_device()
+            model_id_tensor = torch.tensor(model_id, dtype=torch.long).to(device)
 
-        model_embed = self.P(model_id)
-        model_embed = torch.nn.functional.normalize(model_embed, p=2, dim=1)
-        logging.info('prompt')
-        logging.info(prompt)
-        prompt_embed = (
-            self.generate_embed(prompt=prompt)
-        )
-        logging.info('generated_embed')
-        logging.info(len(prompt_embed))
-        # Convert the list to a PyTorch tensor
-        prompt_embed_tensor = torch.tensor(prompt_embed, dtype=torch.float32)
+            # Get model embedding and normalize
+            model_embed = torch.nn.functional.normalize(self.P(model_id_tensor), p=2, dim=1)
 
-        # Instantiate the transformer and move it to the appropriate device
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        embedding_transformer = EmbeddingTransformer(input_dim=384, output_dim=1536).to(device)
+            logging.info('Prompt received: %s', prompt)
+            # Generate prompt embedding
+             # Run the async function synchronously
+            
+            prompt_embed = self.generate_embed(prompt)
+            logging.info('Prompt embedding generated')
 
-        # Ensure the tensor is on the same device as the model
-        prompt_embed_tensor = prompt_embed_tensor.to(device)
+            # Convert prompt embedding to tensor and move to device
+            prompt_embed_tensor = torch.tensor(prompt_embed, dtype=torch.float32).to(device)
+            logging.info('Prompt embedding size: %s', prompt_embed_tensor.size(0))
 
-        # Transform the embedding
-        prompt_embed_transformed = embedding_transformer(prompt_embed_tensor)
-        logging.info('prompt_embed_transformed')
-        logging.info(prompt_embed_transformed)
+            # Transform embedding
+            transformer = EmbeddingTransformer(input_dim=prompt_embed_tensor.size(0))
+            prompt_embed_transformed = transformer.forward(prompt_embed_tensor)
+            logging.info('Transformed prompt embedding size: %s', prompt_embed_transformed.size(0))
 
-        # prompt_embed = torch.tensor(prompt_embed_transformed, device=self.get_device())
-        # logging.info(prompt_embed)
-        prompt_embed = self.text_proj(prompt_embed_transformed)
+            # Project and classify
+            prompt_embed_projected = self.text_proj(prompt_embed_transformed)
+            result = self.classifier(model_embed * prompt_embed_projected).squeeze()
+            logging.info('Forward pass completed successfully')
 
-        return self.classifier(model_embed * prompt_embed).squeeze()
+            return result
+        except requests.RequestException as e:
+            logging.error('HTTP request failed: %s', e)
+            raise RuntimeError('Failed to fetch embeddings from Ollama API') from e
+        except Exception as e:
+            logging.error('Error in forward pass: %s', e)
+            raise RuntimeError('An error occurred during the forward pass') from e
 
     def generate_embed(self, prompt):
-        # response = requests.post('http://localhost:11434/api/embeddings', json={"model": "mxbai-embed-large", "prompt": prompt})
-        # response.raise_for_status()
-        # return response.json()["embedding"]
-        revision = None  # Replace with the specific revision to ensure reproducibility if the model is updated.
+        try:
+            if use_ollama:
+                logging.info('Generating embedding using Ollama API')
+                response = requests.post(
+                    f'{llm_queue_gateway_base_path}/api/embeddings',
+                    json={"model": embedding_model, "prompt": prompt}
+                )
+                response.raise_for_status()
+                embedding = response.json()["embedding"]
+                logging.info('Embedding received from Ollama API')
+                return embedding
+            else:
+                logging.info('Generating embedding using SentenceTransformer')
+                model = SentenceTransformer("avsolatorio/GIST-all-MiniLM-L6-v2")
+                embeddings = model.encode(prompt, convert_to_tensor=False)
+                logging.info('Embedding generated using SentenceTransformer')
+                return embeddings
+        except requests.RequestException as e:
+            logging.error('Failed to fetch embedding from Ollama API: %s', e)
+            raise
+        except Exception as e:
+            logging.error('Error generating embedding: %s', e)
+            raise
 
-        model = SentenceTransformer("avsolatorio/GIST-all-MiniLM-L6-v2", revision=revision)
-
-        # Compute embeddings
-        embeddings = model.encode(prompt, convert_to_tensor=False)
-
-        return embeddings
-
+    
     @torch.no_grad()
     def pred_win_rate(self, model_a, model_b, prompt):
         logits = self.forward([model_a, model_b], prompt)

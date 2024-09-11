@@ -11,3 +11,5 @@ services:
     environment:
       - LLM_QUEUE_GATEWAY_BASE_PATH=http://host.docker.internal:8070/llm-queue-gateway  # Load environment variables
       - FLASK_ENV=production  # Set the environment to production
+      - USE_OLLAMA_FOR_EMBEDDING=True
+      - EMBEDDING_MODEL=mxbai-embed-large

@@ -216,51 +216,62 @@ class Controller:
 
 
     async def acompletion(
-    self,
-    *,
-    router: Optional[str] = None,
-    threshold: Optional[float] = None,
-    full_path: str,
-    **kwargs,
+        self,
+        *,
+        router: Optional[str] = None,
+        threshold: Optional[float] = None,
+        full_path: str,
+        **kwargs,
     ):
-        logging.info(kwargs)
-        
-        if "model" in kwargs:
-            router, threshold = self._parse_model_name(kwargs["model"])
+        try:
+            logging.info('Starting acompletion with kwargs: %s', kwargs)
 
-        self._validate_router_threshold(router, threshold)
-        model_type = self._get_routed_model_for_completion(kwargs["messages"], router, threshold)
+            # Parse model name if provided
+            if "model" in kwargs:
+                router, threshold = self._parse_model_name(kwargs["model"])
 
-        if model_type == 'strong':
-            kwargs["model"] = 'mistral'
-        else:
-            kwargs["model"] = 'tinyllama'
+            # Validate router and threshold
+            self._validate_router_threshold(router, threshold)
+            
+            # Determine model type based on the router and threshold
+            model_type = self._get_routed_model_for_completion(kwargs.get("messages"), router, threshold)
 
-        # Construct the full URL by appending the full_path
-        url = f'{llm_queue_gateway_base_path}/{full_path}'
-        
-        logging.info(f"Requesting URL: {url}")
+            logging.info('Calculated model type: %s', model_type)
 
-        # Use aiohttp for asynchronous HTTP requests
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=kwargs) as response:
-                response.raise_for_status()
+            # Set the appropriate model
+            kwargs["model"] = 'mistral' if model_type == 'strong' else 'tinyllama'
+            logging.info('Model name: %s', kwargs["model"])
 
-                # Handle streaming progress and direct streaming back to the client
-                if response.status == 200:
-                    # Streaming progress
-                    if kwargs['stream'] == True:
-                        # Stream each chunk back to the client as soon as it is received
+            # Construct the full URL by appending the full_path
+            url = f'{llm_queue_gateway_base_path}/{full_path}'
+            logging.info(f"Requesting URL: {url}")
+
+            # Asynchronous HTTP request with error handling
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=kwargs) as response:
+                    response.raise_for_status()
+                    logging.info(f"Response status: {response.status}")
+
+                    # Handle different response types (streaming or standard JSON)
+                    if kwargs.get('stream', False):
+                        logging.info('Streaming response enabled')
                         async for chunk in response.content.iter_any():
                             yield chunk
-                            
                     elif response.content_type == 'application/x-ndjson':
-                        # Handle NDJSON streaming
+                        logging.info('NDJSON streaming detected')
                         async for line in response.content:
                             line = line.decode('utf-8').strip()
                             if line:
                                 yield f"{line}\n".encode('utf-8')
                     else:
-                        # Handle standard JSON responses
+                        # Standard JSON response
+                        logging.info('Processing standard JSON response')
                         data = await response.json()
                         yield json.dumps(data).encode('utf-8')
+
+        except aiohttp.ClientError as e:
+            logging.error('HTTP request failed: %s', e)
+            raise RuntimeError(f'Failed to request {url}') from e
+        except Exception as e:
+            logging.error('Error during acompletion: %s', e)
+            raise RuntimeError('An error occurred during acompletion') from e
