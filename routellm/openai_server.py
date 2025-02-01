@@ -158,9 +158,9 @@ async def stream_response(response: List[dict]) -> AsyncIterable[bytes]:
 #         logging.error(f"Error: {e}")
 #         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/route-llm/{full_path:path}")
-async def create_chat_completion(request: Request, full_path: str):
-    logging.info(f"Received request at /route-llm/{full_path}")
+@app.post("/route-llm/{qengine_workflow_id}/{full_path:path}")
+async def create_chat_completion(request: Request, qengine_workflow_id: str, full_path: str):
+    logging.info(f"Received request at /route-llm/{qengine_workflow_id}/{full_path}")
 
     try:
         # Parse the JSON body from the request
@@ -177,7 +177,7 @@ async def create_chat_completion(request: Request, full_path: str):
             logging.info("Preparing streaming response")
 
             async def generate_stream() -> AsyncIterator[bytes]:
-                async for chunk in CONTROLLER.acompletion(full_path=full_path, **body):
+                async for chunk in CONTROLLER.acompletion(full_path=full_path, qengine_workflow_id=qengine_workflow_id, **body):
                     yield chunk
 
             return StreamingResponse(
@@ -189,7 +189,7 @@ async def create_chat_completion(request: Request, full_path: str):
         else:
             # Handle non-streaming response
             logging.info("Handling non-streaming response")
-            async for response_data in CONTROLLER.acompletion(full_path=full_path, **body):
+            async for response_data in CONTROLLER.acompletion(full_path=full_path, qengine_workflow_id=qengine_workflow_id, **body):
                 return JSONResponse(content=json.loads(response_data.decode('utf-8')))
 
     except json.JSONDecodeError as e:

@@ -1,3 +1,18 @@
+# Docker
+
+**Build Image**
+```
+docker build -t ghcr.io/quixarai/route-llm:3.0 .
+```
+
+**Push Image**
+Username: suraj0004
+password: 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
+```
+docker login ghcr.io
+docker push ghcr.io/quixarai/route-llm:3.0
+```
+
 # RouteLLM
 
 RouteLLM is a framework for serving and evaluating LLM routers.

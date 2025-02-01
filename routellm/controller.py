@@ -2,7 +2,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Optional
-
+from datetime import datetime
 import pandas as pd
 from tqdm import tqdm
 
@@ -13,14 +13,16 @@ import json
 
 from dotenv import load_dotenv
 import os
-
+from routellm.ollama_request_parser import OllamaRequestParser
+from routellm.parsers.OpenAIToOllamaParser import OpenAIToOllamaParser
 # Load environment variables from the .env file
 load_dotenv()   
 
 # Access the environment variable
-llm_queue_gateway_base_path = os.getenv('LLM_QUEUE_GATEWAY_BASE_PATH')
-
-
+# llm_queue_gateway_base_path = os.getenv('LLM_QUEUE_GATEWAY_BASE_PATH')
+openai_api_key = os.getenv('OPENAI_API_KEY')
+Q_ENGINE_API_KEY = os.getenv('Q_ENGINE_API_KEY')
+Q_ENGINE_BASE_PATH = os.getenv('Q_ENGINE_BASE_PATH')
 # Default config for routers augmented using golden label data from GPT-4.
 # This is exactly the same as config.example.yaml.
 GPT_4_AUGMENTED_CONFIG = {
@@ -75,6 +77,9 @@ class Controller:
                 create=self.acompletion, acreate=self.acompletion
             )
         )
+
+        self.ollama_parser = OllamaRequestParser()
+        self.openai_parser = OpenAIToOllamaParser()
 
     def _validate_router_threshold(
         self, router: Optional[str], threshold: Optional[float]
@@ -221,42 +226,81 @@ class Controller:
         router: Optional[str] = None,
         threshold: Optional[float] = None,
         full_path: str,
+        qengine_workflow_id: str,
         **kwargs,
     ):
         try:
-            logging.info('Starting acompletion with kwargs: %s', kwargs)
+            input_payload = kwargs
+            input_api = full_path
+            logging.info('Starting acompletion with input_payload: %s', input_payload)
+            logging.info(f"input_api: {input_api}")
 
             # Parse model name if provided
-            if "model" in kwargs:
-                router, threshold = self._parse_model_name(kwargs["model"])
+            if "model" in input_payload:
+                router, threshold = self._parse_model_name(input_payload["model"])
 
             # Validate router and threshold
             self._validate_router_threshold(router, threshold)
             
             # Determine model type based on the router and threshold
-            model_type = self._get_routed_model_for_completion(kwargs.get("messages"), router, threshold)
+            model_type = self._get_routed_model_for_completion(input_payload.get("messages"), router, threshold)
 
             logging.info('Calculated model type: %s', model_type)
+            strong_model = 'gpt-4'
+            weak_model = 'gpt-3.5-turbo'
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f'{Q_ENGINE_BASE_PATH}/api/studio/workflow/{qengine_workflow_id}/llm-models?apiKey={Q_ENGINE_API_KEY}') as response:
+                    response.raise_for_status()
+                    logging.info(f"Response status: {response.status}")
+
+                    # Parse the JSON response into a dictionary
+                    data = await response.json()
+                    logging.info(data)
+
+                    # Check if the 'success' key exists and is True
+                    if data.get("success") == True:  # Use .get() to avoid KeyError if 'success' is missing
+                        strong_model = data["data"]["strongModel"]
+                        weak_model = data["data"]["weakModel"]  # Correctly access 'weakModel'
+                    else:
+                        logging.error("The 'success' key is not True or missing in the response.")
+
 
             # Set the appropriate model
-            kwargs["model"] = 'mistral' if model_type == 'strong' else 'tinyllama'
-            logging.info('Model name: %s', kwargs["model"])
+            input_payload["model"] = strong_model if model_type == 'strong' else weak_model
+            logging.info('Model name: %s', input_payload["model"])
 
             # Construct the full URL by appending the full_path
-            url = f'{llm_queue_gateway_base_path}/{full_path}'
-            logging.info(f"Requesting URL: {url}")
+            
+            # url = f'{llm_queue_gateway_base_path}/{full_path}'
+            logging.info(f"\n\n Parsing ollama payload to openai \n\n ")
+            logging.info(f"before parsing : {json.dumps(input_payload, indent=2)} \n\n ")
+            parsed_response =  self.ollama_parser.parse_request(input_api, input_payload,"openai")
+            logging.info(f"after parsing: {json.dumps(parsed_response, indent=2)} \n\n ")
+            headers = {
+                    "Authorization": f"Bearer {openai_api_key}",
+                    "Content-Type": "application/json"
+                }
+            logging.info(f"Requesting URL: {parsed_response['url']} \n\n ")
+            logging.info(f"headers: {headers} \n\n ")
+            logging.info(f"body: {parsed_response['body']} \n\n ")
 
             # Asynchronous HTTP request with error handling
             async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=kwargs) as response:
+                
+                async with session.post(parsed_response["url"], json=parsed_response["body"], headers=headers) as response:
                     response.raise_for_status()
                     logging.info(f"Response status: {response.status}")
 
                     # Handle different response types (streaming or standard JSON)
-                    if kwargs.get('stream', False):
+                    if input_payload.get('stream', False):
                         logging.info('Streaming response enabled')
+
                         async for chunk in response.content.iter_any():
-                            yield chunk
+                            # Call the parse_chunk function from the OpenAItoOllamaResponseParser class
+                            for ollama_chunk in self.openai_parser.parse_chunk(chunk):
+                                # Yield or process the Ollama chunk
+                                yield ollama_chunk
+                        #   yield chunk
                     elif response.content_type == 'application/x-ndjson':
                         logging.info('NDJSON streaming detected')
                         async for line in response.content:
@@ -264,14 +308,17 @@ class Controller:
                             if line:
                                 yield f"{line}\n".encode('utf-8')
                     else:
-                        # Standard JSON response
+                    # Standard JSON response
                         logging.info('Processing standard JSON response')
                         data = await response.json()
-                        yield json.dumps(data).encode('utf-8')
+                        logging.info(f" \n\n response from openai: \n\n {json.dumps(data, indent=2)}  \n\n ")
+                        yield json.dumps(self.openai_parser.parse(data)).encode('utf-8')
 
         except aiohttp.ClientError as e:
+            logging.error(e)
             logging.error('HTTP request failed: %s', e)
-            raise RuntimeError(f'Failed to request {url}') from e
+            raise RuntimeError(f'Failed to request {parsed_response["url"]}') from e
         except Exception as e:
+            logging.error(e)
             logging.error('Error during acompletion: %s', e)
             raise RuntimeError('An error occurred during acompletion') from e

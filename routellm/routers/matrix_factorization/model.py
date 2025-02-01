@@ -8,13 +8,19 @@ from dotenv import load_dotenv
 import os
 import aiohttp
 import asyncio
+from openai import OpenAI
 # Load environment variables from the .env file
 load_dotenv()   
 
 # Access the environment variable
+openai_api_key = os.getenv('OPENAI_API_KEY')
 llm_queue_gateway_base_path = os.getenv('LLM_QUEUE_GATEWAY_BASE_PATH')
+use_openai_embedding  = os.getenv('USE_OPENAI_EMBEDDING', 'True').lower() == 'true'
 use_ollama  = os.getenv('USE_OLLAMA_FOR_EMBEDDING', 'True').lower() == 'true'
 embedding_model = os.getenv('EMBEDDING_MODEL', 'mxbai-embed-large')
+
+
+openai_client = OpenAI(api_key=openai_api_key)
 
 MODEL_IDS = {
     "RWKV-4-Raven-14B": 0,
@@ -160,12 +166,13 @@ class MFModel(torch.nn.Module, PyTorchModelHubMixin):
             logging.info('Prompt embedding size: %s', prompt_embed_tensor.size(0))
 
             # Transform embedding
-            transformer = EmbeddingTransformer(input_dim=prompt_embed_tensor.size(0))
-            prompt_embed_transformed = transformer.forward(prompt_embed_tensor)
-            logging.info('Transformed prompt embedding size: %s', prompt_embed_transformed.size(0))
+            # transformer = EmbeddingTransformer(input_dim=prompt_embed_tensor.size(0))
+            # prompt_embed_transformed = transformer.forward(prompt_embed_tensor)
+            # logging.info('Transformed prompt embedding size: %s', prompt_embed_transformed.size(0))
 
             # Project and classify
-            prompt_embed_projected = self.text_proj(prompt_embed_transformed)
+            # prompt_embed_projected = self.text_proj(prompt_embed_transformed)
+            prompt_embed_projected = self.text_proj(prompt_embed_tensor)
             result = self.classifier(model_embed * prompt_embed_projected).squeeze()
             logging.info('Forward pass completed successfully')
 
@@ -179,7 +186,16 @@ class MFModel(torch.nn.Module, PyTorchModelHubMixin):
 
     def generate_embed(self, prompt):
         try:
-            if use_ollama:
+            if use_openai_embedding:
+                logging.info('Generating embedding using OpenAI API')
+                response = openai_client.embeddings.create(
+                    model="text-embedding-3-small",
+                    input=prompt
+                )
+                embedding = response.data[0].embedding
+                logging.info('Embedding received from OpenAI API')
+                return embedding
+            elif use_ollama:
                 logging.info('Generating embedding using Ollama API')
                 response = requests.post(
                     f'{llm_queue_gateway_base_path}/api/embeddings',

@@ -9,7 +9,11 @@ services:
     ports:
       - "6060:6060"  # Map container's port 8000 to host's port 8000
     environment:
-      - LLM_QUEUE_GATEWAY_BASE_PATH=http://host.docker.internal:8070/llm-queue-gateway  # Load environment variables
       - FLASK_ENV=production  # Set the environment to production
-      - USE_OLLAMA_FOR_EMBEDDING=True
+      - LLM_QUEUE_GATEWAY_BASE_PATH=http://host.docker.internal:8070/llm-queue-gateway  # Load environment variables
+      - USE_OPENAI_EMBEDDING=True
+      - USE_OLLAMA_FOR_EMBEDDING=False
       - EMBEDDING_MODEL=mxbai-embed-large
+      - OPENAI_API_KEY=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
+      - Q_ENGINE_API_KEY=4c4b1476238e617c16a327814993d07e2e7381675fba6dff7b6f9793a3f2d2d1
+      
