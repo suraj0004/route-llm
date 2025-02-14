@@ -2,15 +2,19 @@
 
 **Build Image**
 ```
-docker build -t ghcr.io/quixarai/route-llm:3.0 .
+docker build -t quixarai/route-llm:5.0 .
 ```
 
-**Push Image**
-Username: suraj0004
-password: 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
+**create tar file of image for manullay image push**
+
 ```
-docker login ghcr.io
-docker push ghcr.io/quixarai/route-llm:3.0
+docker save -o quixarai-route-llm-5-0.tar quixarai/route-llm:5.0
+```
+
+**create docker image from tar file**
+
+```
+docker load -i quixarai-route-llm-5-0.tar
 ```
 
 # RouteLLM
