@@ -33,12 +33,23 @@ class OllamaRequestParser:
             "url": api_url,
             "body": body
         }
+    
+
+
 
 #v3
     def _parse_body_messages(self, messages):
         """
         Parses messages to extract tool calls and update tool_call_id in tool messages.
         """
+
+        def get_and_remove_tool_id(tool_mapping, tool_name):
+            for index, tool in enumerate(tool_mapping):
+                if tool["tool_name"] == tool_name:
+                    return tool_mapping.pop(index)["tool_id"]
+            return None  # Return None if no match is found
+
+        
         if not messages or messages[-1]["role"] != "tool":
             return messages  # No processing needed if messages list is empty
 
@@ -63,6 +74,7 @@ class OllamaRequestParser:
             tool_start_index = assistant_index + 1
             tool_end_index = len(messages) - 1
 
+            tool_mapping = []
             # Parse tool metadata from the assistant's message
             try:
                 tool_meta = json.loads(messages[assistant_index]["content"])
@@ -74,7 +86,10 @@ class OllamaRequestParser:
                 messages[assistant_index]["tool_calls"] = tool_meta  # Assign updated tool_meta to assistant message
 
                 # Create a mapping of tool names to their corresponding tool IDs
-                tool_mapping = {tool["function"]["name"]: tool["id"] for tool in tool_meta}
+                tool_mapping = [
+                    {"tool_name": tool["function"]["name"], "tool_id": tool["id"]}
+                    for tool in tool_meta
+                ]
 
             except json.JSONDecodeError:
                 continue  # Skip if JSON parsing fails for the assistant's message
@@ -87,7 +102,7 @@ class OllamaRequestParser:
                 try:
                     tool_data = json.loads(messages[index]["content"])
                     tool_name = tool_data.get("tool_name")
-                    tool_id = tool_mapping.get(tool_name)
+                    tool_id = get_and_remove_tool_id(tool_mapping, tool_name)
 
                     if tool_id:
                         messages[index]["tool_call_id"] = tool_id  # Add tool_call_id to message
